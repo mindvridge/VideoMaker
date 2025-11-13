@@ -69,6 +69,30 @@ test: ## Run tests
 	@echo "Running tests..."
 	docker-compose -f docker-compose.dev.yml exec web pytest
 
+test-coverage: ## Run tests with coverage
+	@echo "Running tests with coverage..."
+	docker-compose -f docker-compose.dev.yml exec web pytest --cov=app --cov-report=html --cov-report=term
+
+test-local: ## Run tests locally (without Docker)
+	@echo "Running tests locally..."
+	cd backend && pytest
+
+test-watch: ## Run tests in watch mode
+	@echo "Running tests in watch mode..."
+	cd backend && pytest-watch
+
+test-unit: ## Run unit tests only
+	@echo "Running unit tests..."
+	cd backend && pytest -m unit
+
+test-integration: ## Run integration tests only
+	@echo "Running integration tests..."
+	cd backend && pytest -m integration
+
+test-security: ## Run security tests only
+	@echo "Running security tests..."
+	cd backend && pytest -m security
+
 lint: ## Run linters
 	@echo "Running linters..."
 	docker-compose -f docker-compose.dev.yml exec web flake8 app/
