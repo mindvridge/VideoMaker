@@ -5,21 +5,32 @@ import json
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from celery.result import AsyncResult
 from loguru import logger
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import redis
 import asyncio
 
-from .config import get_settings
+from .config import get_settings, get_cors_origins
 from .worker import celery_app
 from .tasks import generate_video_task, get_task_progress, cancel_task
 from .models import ModelType
 
 settings = get_settings()
+
+# Configure rate limiter
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
+    enabled=settings.RATE_LIMIT_ENABLED,
+    storage_uri=settings.CELERY_BROKER_URL,  # Use Redis for rate limit storage
+)
 
 # Configure logger
 logger.add(
@@ -36,13 +47,21 @@ app = FastAPI(
     description="AI Video Generation API with multiple model support"
 )
 
-# Configure CORS
+# Add rate limiter to app state
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Configure CORS with environment-specific origins
+cors_origins = get_cors_origins()
+logger.info(f"CORS enabled for origins: {cors_origins}")
+logger.info(f"Rate limiting enabled: {settings.RATE_LIMIT_ENABLED}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify actual origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=settings.CORS_ALLOW_METHODS.split(","),
+    allow_headers=settings.CORS_ALLOW_HEADERS.split(",") if settings.CORS_ALLOW_HEADERS != "*" else ["*"],
 )
 
 # Redis client for SSE
@@ -154,7 +173,8 @@ async def list_models():
 
 
 @app.post("/api/generate", response_model=TaskResponse)
-async def generate_video(request: VideoGenerationRequest):
+@limiter.limit(f"{settings.RATE_LIMIT_GENERATE_PER_HOUR}/hour")
+async def generate_video(request: Request, video_request: VideoGenerationRequest):
     """
     Submit video generation task.
 
@@ -164,25 +184,25 @@ async def generate_video(request: VideoGenerationRequest):
     try:
         # Validate model type
         try:
-            ModelType(request.model_type)
+            ModelType(video_request.model_type)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid model type: {request.model_type}"
+                detail=f"Invalid model type: {video_request.model_type}"
             )
 
         # Submit task to Celery
         task = generate_video_task.apply_async(
             kwargs={
-                "model_type": request.model_type,
-                "prompt": request.prompt,
-                "num_frames": request.num_frames,
-                "height": request.height,
-                "width": request.width,
-                "fps": request.fps,
-                "num_inference_steps": request.num_inference_steps,
-                "guidance_scale": request.guidance_scale,
-                "upload_to_s3": request.upload_to_s3
+                "model_type": video_request.model_type,
+                "prompt": video_request.prompt,
+                "num_frames": video_request.num_frames,
+                "height": video_request.height,
+                "width": video_request.width,
+                "fps": video_request.fps,
+                "num_inference_steps": video_request.num_inference_steps,
+                "guidance_scale": video_request.guidance_scale,
+                "upload_to_s3": video_request.upload_to_s3
             }
         )
 
@@ -202,7 +222,9 @@ async def generate_video(request: VideoGenerationRequest):
 
 
 @app.post("/api/generate/i2v", response_model=TaskResponse)
+@limiter.limit(f"{settings.RATE_LIMIT_UPLOAD_PER_HOUR}/hour")
 async def generate_video_i2v(
+    request: Request,
     model_type: str = Form(...),
     prompt: str = Form(...),
     image: UploadFile = File(...),
@@ -299,7 +321,8 @@ async def generate_video_i2v(
 
 
 @app.get("/api/status/{task_id}", response_model=TaskStatusResponse)
-async def get_task_status(task_id: str):
+@limiter.limit("100/minute")
+async def get_task_status(request: Request, task_id: str):
     """Get task status and progress."""
     try:
         # Get Celery task result
@@ -407,7 +430,8 @@ async def websocket_progress(websocket: WebSocket, task_id: str):
 
 
 @app.delete("/api/task/{task_id}")
-async def cancel_task_endpoint(task_id: str):
+@limiter.limit("30/minute")
+async def cancel_task_endpoint(request: Request, task_id: str):
     """Cancel a running task."""
     try:
         result = cancel_task(task_id)

@@ -30,6 +30,11 @@ env/
 # Environment variables
 .env
 .env.local
+# Keep environment templates
+!.env.example
+!.env.development
+!.env.staging
+!.env.production
 
 # Logs
 *.log

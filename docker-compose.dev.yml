@@ -1,0 +1,101 @@
+# Docker Compose for Development Environment
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: video-gen-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_dev:/data
+    command: redis-server --appendonly yes
+    networks:
+      - video-gen-network
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-web-dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.development
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/logs:/app/logs
+      - video_outputs_dev:/tmp/video-outputs
+      - huggingface_cache_dev:/root/.cache/huggingface
+    depends_on:
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - video-gen-network
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-worker-dev
+    env_file:
+      - .env.development
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/logs:/app/logs
+      - video_outputs_dev:/tmp/video-outputs
+      - huggingface_cache_dev:/root/.cache/huggingface
+    depends_on:
+      - redis
+    command: celery -A app.worker.celery_app worker --loglevel=debug --concurrency=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - video-gen-network
+
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-flower-dev
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env.development
+    depends_on:
+      - redis
+    command: celery -A app.worker.celery_app flower --port=5555
+    networks:
+      - video-gen-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: video-gen-frontend-dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - web
+    networks:
+      - video-gen-network
+
+networks:
+  video-gen-network:
+    driver: bridge
+
+volumes:
+  redis_data_dev:
+  video_outputs_dev:
+  huggingface_cache_dev:

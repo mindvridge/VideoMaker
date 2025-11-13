@@ -2,9 +2,17 @@
 Configuration management for the video generation application.
 """
 import os
-from typing import Optional
+from typing import Optional, List
+from enum import Enum
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+
+class Environment(str, Enum):
+    """Application environment."""
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
 
 
 class Settings(BaseSettings):
@@ -14,10 +22,23 @@ class Settings(BaseSettings):
     APP_NAME: str = "AI Video Generation API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+    ENVIRONMENT: Environment = Environment.DEVELOPMENT
 
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+
+    # CORS Settings
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"
+    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_ALLOW_METHODS: str = "GET,POST,PUT,DELETE,OPTIONS"
+    CORS_ALLOW_HEADERS: str = "*"
+
+    # Rate Limiting
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 60  # General API calls
+    RATE_LIMIT_GENERATE_PER_HOUR: int = 10  # Video generation calls
+    RATE_LIMIT_UPLOAD_PER_HOUR: int = 20  # Image uploads
 
     # Celery
     CELERY_BROKER_URL: str = "redis://redis:6379/0"
@@ -77,6 +98,34 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+def get_cors_origins() -> List[str]:
+    """
+    Get CORS allowed origins based on environment.
+
+    Returns:
+        List of allowed origins
+    """
+    settings = get_settings()
+
+    # Parse CORS_ORIGINS from comma-separated string
+    origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",")]
+
+    # In development, allow localhost variations
+    if settings.ENVIRONMENT == Environment.DEVELOPMENT:
+        dev_origins = [
+            "http://localhost:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8000",
+        ]
+        # Add dev origins if not already in list
+        for origin in dev_origins:
+            if origin not in origins:
+                origins.append(origin)
+
+    return origins
 
 
 # Create output directory if it doesn't exist

@@ -1,0 +1,115 @@
+# Docker Compose for Production Environment
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: video-gen-redis-prod
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_prod:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    networks:
+      - video-gen-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-web-prod
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.production
+    volumes:
+      - ./backend/logs:/app/logs
+      - video_outputs_prod:/tmp/video-outputs
+      - huggingface_cache_prod:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    networks:
+      - video-gen-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-worker-prod
+    restart: always
+    env_file:
+      - .env.production
+    volumes:
+      - ./backend/logs:/app/logs
+      - video_outputs_prod:/tmp/video-outputs
+      - huggingface_cache_prod:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - video-gen-network
+
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-flower-prod
+    restart: always
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env.production
+    environment:
+      - FLOWER_BASIC_AUTH=${FLOWER_USER}:${FLOWER_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app flower --port=5555
+    networks:
+      - video-gen-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    container_name: video-gen-frontend-prod
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.production
+    depends_on:
+      - web
+    networks:
+      - video-gen-network
+
+networks:
+  video-gen-network:
+    driver: bridge
+
+volumes:
+  redis_data_prod:
+  video_outputs_prod:
+  huggingface_cache_prod:
