@@ -1,0 +1,138 @@
+version: '3.8'
+
+services:
+  # Redis for Celery broker and backend
+  redis:
+    image: redis:7-alpine
+    container_name: video-gen-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - video-gen-network
+
+  # FastAPI Backend
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-web
+    ports:
+      - "8000:8000"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - ENABLE_CPU_OFFLOAD=${ENABLE_CPU_OFFLOAD:-true}
+      - USE_BF16=${USE_BF16:-true}
+      - USE_FP16=${USE_FP16:-false}
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/logs:/app/logs
+      - video_outputs:/tmp/video-outputs
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - video-gen-network
+
+  # Celery Worker (GPU)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - ENABLE_CPU_OFFLOAD=${ENABLE_CPU_OFFLOAD:-true}
+      - USE_BF16=${USE_BF16:-true}
+      - USE_FP16=${USE_FP16:-false}
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/logs:/app/logs
+      - video_outputs:/tmp/video-outputs
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - video-gen-network
+
+  # Flower - Celery Monitoring
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-gen-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app flower --port=5555
+    networks:
+      - video-gen-network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: video-gen-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - web
+    networks:
+      - video-gen-network
+
+networks:
+  video-gen-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  video_outputs:
+  huggingface_cache:
